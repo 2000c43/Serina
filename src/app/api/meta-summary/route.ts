@@ -1,261 +1,185 @@
 // src/app/api/meta-summary/route.ts
 import { NextResponse } from "next/server";
 import type {
-  MetaSummaryResponse,
   ProviderResponse,
   RetrievalSource,
+  MetaSummaryResponse,
 } from "../../lib/types";
 
-type MetaSummaryRequestBody = {
-  prompt?: string;
-  results?: ProviderResponse[];
-  sources?: RetrievalSource[]; // optional
-  // optional override for demo/dev; prefer server env key in prod
+export const runtime = "nodejs";
+
+type MetaSummaryRequest = {
+  prompt: string;
+  results: ProviderResponse[];
+  sources?: RetrievalSource[];
   openaiApiKey?: string;
 };
 
-export const runtime = "nodejs"; // avoid edge streaming quirks for JSON
-
-const MODEL_DEFAULT = "gpt-5.2";
-const TEMPERATURE_DEFAULT = 0.2;
+const MODEL = "gpt-5.2";
+const TEMPERATURE = 0.2;
 const MAX_OUTPUT_TOKENS = 3200;
 
-function extractOutputText(respJson: any): string {
-  if (typeof respJson?.output_text === "string" && respJson.output_text.trim()) {
-    return respJson.output_text.trim();
+/**
+ * Extracts text from OpenAI Responses API output safely
+ */
+function extractText(resp: any): string {
+  if (typeof resp?.output_text === "string" && resp.output_text.trim()) {
+    return resp.output_text.trim();
   }
-
-  const output = respJson?.output;
-  if (!Array.isArray(output)) return "";
-
   const chunks: string[] = [];
-  for (const item of output) {
-    const content = item?.content;
-    if (!Array.isArray(content)) continue;
-    for (const c of content) {
-      const t = c?.text;
-      if (typeof t === "string" && t.trim()) chunks.push(t);
+  for (const item of resp?.output ?? []) {
+    for (const c of item?.content ?? []) {
+      if (typeof c?.text === "string") chunks.push(c.text);
     }
   }
   return chunks.join("\n").trim();
 }
 
-function safeParsePossiblyTruncatedJson(raw: string) {
-  const text = (raw || "").trim();
-
-  const lastBrace = text.lastIndexOf("}");
-  if (lastBrace === -1) {
-    throw new Error("Meta-summary did not return a JSON object.");
+/**
+ * Safely parse JSON even if the model slightly over-generates
+ */
+function parseJsonSafe(text: string): any {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end === -1) {
+    throw new Error("Meta-summary did not return JSON.");
   }
-
-  const candidate = text.slice(0, lastBrace + 1);
-
-  try {
-    return JSON.parse(candidate);
-  } catch (e: any) {
-    const preview = candidate.slice(0, 2000);
-    const msg = e?.message ? String(e.message) : "JSON parse error";
-    throw new Error(
-      `Meta-summary did not return valid JSON: ${msg}\nTEXT PREVIEW:\n${preview}`
-    );
-  }
-}
-
-function buildJsonSchema() {
-  // IMPORTANT:
-  // OpenAI strict json_schema requires `required` to include EVERY key in `properties`
-  // when additionalProperties:false. So we require all fields and allow empty strings.
-  return {
-    name: "serina_meta_summary",
-    strict: true,
-    schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        finalAnswer: { type: "string" },
-        keyFacts: {
-          type: "array",
-          items: { type: "string" },
-        },
-        sentences: {
-          type: "array",
-          items: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              text: { type: "string" },
-              citations: {
-                type: "array",
-                items: { type: "number" },
-              },
-              confidence: { type: "number" },
-            },
-            required: ["text", "citations", "confidence"],
-          },
-        },
-        disagreements: {
-          type: "array",
-          items: { type: "string" },
-        },
-        sources: {
-          type: "array",
-          items: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              id: { type: "number" },
-              title: { type: "string" },
-              url: { type: "string" },
-              snippet: { type: "string" },
-            },
-            // Strict requires ALL keys listed here:
-            required: ["id", "title", "url", "snippet"],
-          },
-        },
-      },
-      required: ["finalAnswer", "keyFacts", "sentences", "disagreements", "sources"],
-    },
-  };
-}
-
-function buildSystemPrompt(): string {
-  return [
-    "You are Serina’s meta-summarizer.",
-    "You will receive: (a) user prompt, (b) multiple provider answers, and optionally (c) web retrieval sources.",
-    "",
-    "Goals:",
-    "1) Produce a clear, accurate, helpful answer that synthesizes the BEST information across providers and sources.",
-    "2) Capture UNIQUE facts: if one provider mentions a unique detail that seems relevant, include it unless it is clearly wrong.",
-    "3) Identify meaningful disagreements/conflicts between sources/providers in 'disagreements'.",
-    "4) Keep 'finalAnswer' readable: do NOT include bracket citations like [1] in finalAnswer.",
-    "",
-    "Output formatting requirements:",
-    "- Return STRICT JSON matching the provided JSON schema.",
-    "- finalAnswer should be ~8–14 sentences when there is ample information; shorter only if information is truly limited.",
-    "- keyFacts should be 8–15 bullets when there is ample information; fewer if limited.",
-    "- sentences should be 6–12 items. Each sentence should map to citations by source id when applicable.",
-    "- Use citations only when the sentence is supported by the provided sources list; otherwise citations: [].",
-    "",
-    "IMPORTANT ABOUT sources[]:",
-    "- Each sources[] item MUST include id,title,url,snippet (all fields required).",
-    "- If any of title/url/snippet is unknown, set it to the empty string \"\".",
-  ].join("\n");
-}
-
-function buildUserPrompt(
-  prompt: string,
-  results: ProviderResponse[],
-  sources: RetrievalSource[] | undefined
-): string {
-  const providerBlock = (results || [])
-    .map((r) => {
-      const header = `PROVIDER: ${r.provider} | model: ${r.model || "(unknown)"} | latencyMs: ${r.latencyMs}`;
-      const body = r.error ? `ERROR: ${r.error}` : (r.text || "").trim() || "(empty)";
-      return `${header}\n${body}`;
-    })
-    .join("\n\n---\n\n");
-
-  const sourcesBlock =
-    Array.isArray(sources) && sources.length
-      ? sources
-          .map((s) => {
-            const title = s.title ? s.title : "Source";
-            const url = s.url ? s.url : "";
-            const snippet = (s.snippet || "").trim();
-            return `[${s.id}] ${title}\n${url}\n${snippet}`;
-          })
-          .join("\n\n")
-      : "(no retrieval sources provided)";
-
-  return [
-    `USER PROMPT:\n${prompt}`,
-    "",
-    "WEB SOURCES:",
-    sourcesBlock,
-    "",
-    "PROVIDER ANSWERS:",
-    providerBlock,
-  ].join("\n");
+  return JSON.parse(text.slice(start, end + 1));
 }
 
 export async function POST(req: Request) {
   try {
-    const body = (await req.json()) as MetaSummaryRequestBody;
+    const body = (await req.json()) as MetaSummaryRequest;
 
-    const prompt = (body.prompt || "").trim();
-    if (!prompt) {
-      return NextResponse.json({ error: "Missing prompt." }, { status: 400 });
-    }
-
-    const results = Array.isArray(body.results) ? body.results : [];
-    const sources = Array.isArray(body.sources) ? body.sources : [];
-
-    const openaiKey =
-      (process.env.OPENAI_API_KEY || "").trim() || (body.openaiApiKey || "").trim();
-
-    if (!openaiKey) {
+    if (!body.prompt || !body.results?.length) {
       return NextResponse.json(
-        { error: "OPENAI_API_KEY is not set on server (and no openaiApiKey provided)." },
-        { status: 500 }
+        { error: "Missing prompt or provider results." },
+        { status: 400 }
       );
     }
 
-    const schema = buildJsonSchema();
-    const system = buildSystemPrompt();
-    const user = buildUserPrompt(prompt, results, sources);
+    const apiKey = body.openaiApiKey || process.env.OPENAI_API_KEY || "";
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: "Missing OpenAI API key for meta-summary." },
+        { status: 401 }
+      );
+    }
 
-    const payload = {
-      model: MODEL_DEFAULT,
-      temperature: TEMPERATURE_DEFAULT,
-      max_output_tokens: MAX_OUTPUT_TOKENS,
-      text: {
-        format: {
-          type: "json_schema",
-          name: schema.name,
-          schema: schema.schema,
-          strict: schema.strict,
-        },
-      },
-      input: [
-        { role: "system", content: [{ type: "input_text", text: system }] },
-        { role: "user", content: [{ type: "input_text", text: user }] },
-      ],
-    };
+    const providerBlock = body.results
+      .map((r) => {
+        const header = `PROVIDER: ${r.provider} | model=${r.model || "unknown"}`;
+        const content = r.error
+          ? `ERROR: ${r.error}`
+          : r.text?.trim() || "(no output)";
+        return `${header}\n${content}`;
+      })
+      .join("\n\n---\n\n");
 
-    const r = await fetch("https://api.openai.com/v1/responses", {
+    const sourcesBlock =
+      body.sources && body.sources.length
+        ? body.sources
+            .map(
+              (s) =>
+                `[${s.id}] ${s.title || ""}\n${s.url || ""}\n${s.snippet || ""}`
+            )
+            .join("\n\n")
+        : "(no web sources provided)";
+
+    // 🔧 UPGRADED SYSTEM PROMPT:
+    // - Forces "union of facts" across all providers + sources
+    // - Forces KeyFacts to include *every* unique factual claim
+    // - Forces disagreements when providers differ
+    // - Avoids over-refusal but blocks sensitive private data
+    const systemPrompt = `
+You are Serina, a meta-summarization engine.
+
+Goal: produce the best combined answer for ANY prompt by synthesizing:
+(1) multiple provider answers, (2) optional web sources.
+
+CRITICAL RULE: FACT-UNION
+- You MUST include EVERY unique, relevant factual claim that appears in ANY provider answer or web source.
+- If multiple providers say the same fact, include it once (dedupe).
+- If facts conflict, include BOTH as a disagreement and explain what would resolve it.
+
+Do NOT tune for any specific topic. This must work for all prompts.
+
+Safety:
+- Do NOT output sensitive personal data: exact home addresses, personal phone numbers, personal emails, SSNs, etc.
+- You MAY summarize public/professional information about people (jobs, education, public profiles, public business roles).
+- Do NOT default to refusing. Only refuse the sensitive categories above.
+
+Output STRICT JSON ONLY with this shape:
+
+{
+  "finalAnswer": string,
+  "keyFacts": string[],
+  "sentences": { "text": string, "citations": number[], "confidence": number }[],
+  "disagreements": string[],
+  "sources": { "id": number, "title": string, "url": string, "snippet": string }[]
+}
+
+Formatting requirements:
+- keyFacts: 6–14 bullets, each a single distinct fact, written clearly.
+- finalAnswer: 5–10 sentences; must incorporate ALL keyFacts (either explicitly or by direct paraphrase).
+- sentences: 6–12 sentence objects; each sentence should be one claim; include citations if any source supports it.
+- disagreements: list any conflicts or uncertain claims (including “not enough corroboration”).
+- sources: echo back sources that were provided (id/title/url/snippet). Do NOT invent sources.
+
+Citations:
+- citations refer only to the provided web source ids (e.g. [1],[2]).
+- If there are no web sources, citations should be [].
+`;
+
+    const userPrompt = `
+USER PROMPT:
+${body.prompt}
+
+=== PROVIDER ANSWERS ===
+${providerBlock}
+
+=== WEB SOURCES ===
+${sourcesBlock}
+`;
+
+    const openaiResp = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${openaiKey}`,
+        Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        model: MODEL,
+        temperature: TEMPERATURE,
+        max_output_tokens: MAX_OUTPUT_TOKENS,
+        input: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+      }),
     });
 
-    if (!r.ok) {
-      const errText = await r.text();
+    const json = await openaiResp.json();
+
+    if (!openaiResp.ok) {
       return NextResponse.json(
-        { error: `OpenAI meta-summary error ${r.status}: ${errText}` },
+        {
+          error: `OpenAI meta-summary error ${openaiResp.status}: ${JSON.stringify(
+            json
+          )}`,
+        },
         { status: 500 }
       );
     }
 
-    const respJson = await r.json();
-    const rawText = extractOutputText(respJson);
-
-    if (!rawText) {
-      return NextResponse.json({ error: "Meta-summary returned empty text." }, { status: 500 });
-    }
-
-    const parsed = safeParsePossiblyTruncatedJson(rawText) as MetaSummaryResponse;
-
-    parsed.keyFacts = Array.isArray(parsed.keyFacts) ? parsed.keyFacts : [];
-    parsed.sentences = Array.isArray(parsed.sentences) ? parsed.sentences : [];
-    parsed.disagreements = Array.isArray(parsed.disagreements) ? parsed.disagreements : [];
-    parsed.sources = Array.isArray(parsed.sources) ? parsed.sources : [];
+    const text = extractText(json);
+    const parsed = parseJsonSafe(text) as MetaSummaryResponse;
 
     return NextResponse.json(parsed);
-  } catch (e: any) {
-    const msg = e?.message ? String(e.message) : "Unknown error";
-    return NextResponse.json({ error: msg }, { status: 500 });
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: err?.message || "Meta-summary failed." },
+      { status: 500 }
+    );
   }
 }
