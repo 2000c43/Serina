@@ -1,107 +1,88 @@
-import { AiProvider, ProviderRequest, ProviderResponse } from "../types";
+// src/app/lib/providers/gemini.ts
+import type { AiProvider, ProviderRequest, ProviderResponse } from "../types";
 
-async function callGeminiOnce(
-  req: ProviderRequest,
-  apiKey: string,
-  model: string,
-  promptOverride?: string
-): Promise<{ ok: boolean; text: string; error?: string }> {
-  const systemPrompt = `
-You are an expert research assistant.
-Answer the user's question directly and specifically.
-Do NOT talk about the user or infer identities unless asked.
-Avoid filler like "Based on publicly available information..."
-Give a concise direct answer first, then add 2–5 supporting details.
-Write at least 6 sentences if possible.
-`.trim();
-
-  const body = {
-    contents: [
-      {
-        role: "user",
-        parts: [
-          {
-            text: `${systemPrompt}\n\nQuestion:\n${
-              promptOverride ?? req.prompt
-            }`,
-          },
-        ],
-      },
-    ],
-    generationConfig: {
-      temperature: req.temperature ?? 0.2,
-      maxOutputTokens: req.maxTokens ?? 900,
-    },
-  };
-
-  const url = `https://generativelanguage.googleapis.com/v1/models/${encodeURIComponent(
-    model
-  )}:generateContent?key=${encodeURIComponent(apiKey)}`;
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-
-  const json = await res.json();
-
-  if (!res.ok) {
-    return {
-      ok: false,
-      text: "",
-      error: `Gemini error: ${res.status} ${JSON.stringify(json)}`,
-    };
-  }
-
-  const parts: any[] = json?.candidates?.[0]?.content?.parts ?? [];
-  const text = parts.map((p) => p?.text ?? "").join("").trim();
-
-  return { ok: true, text };
-}
+// IMPORTANT:
+// If you send "systemInstruction", you must call the v1beta endpoint.
+// Your error was: Unknown name "systemInstruction" -> you were hitting v1.
+const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
+const DEFAULT_MODEL = "gemini-2.5-flash"; // what you want
 
 export const geminiProvider: AiProvider = {
   name: "gemini",
-
   async call(req: ProviderRequest, apiKey: string): Promise<ProviderResponse> {
-    const start = Date.now();
-    const model = req.model ?? "gemini-2.5-flash";
+    const t0 = Date.now();
+    const model = req.model?.trim() || DEFAULT_MODEL;
 
-    // Attempt 1
-    const r1 = await callGeminiOnce(req, apiKey, model);
-    if (!r1.ok) {
+    const url = `${GEMINI_BASE}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(
+      apiKey.trim()
+    )}`;
+
+    const system = (req.systemPrompt ?? "").trim();
+    const user = (req.prompt ?? "").trim();
+
+    // v1beta supports systemInstruction object
+    const body: any = {
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: user }],
+        },
+      ],
+      generationConfig: {
+        temperature: typeof req.temperature === "number" ? req.temperature : 0.2,
+        maxOutputTokens: req.maxTokens ?? 1400,
+      },
+    };
+
+    if (system) {
+      body.systemInstruction = {
+        parts: [{ text: system }],
+      };
+    }
+
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const latencyMs = Date.now() - t0;
+    const raw = await r.text();
+
+    if (!r.ok) {
       return {
         provider: "gemini",
         model,
         text: "",
-        latencyMs: Date.now() - start,
-        error: r1.error,
+        latencyMs,
+        error: `Gemini ${r.status}: ${raw}`,
       };
     }
 
-    // If too short / useless, retry once with a “be more thorough” nudge
-    const tooShort = (r1.text ?? "").length < 200;
-    if (!tooShort) {
+    let json: any;
+    try {
+      json = JSON.parse(raw);
+    } catch {
       return {
         provider: "gemini",
         model,
-        text: r1.text,
-        latencyMs: Date.now() - start,
+        text: "",
+        latencyMs,
+        error: `Gemini parse error: ${raw.slice(0, 300)}`,
       };
     }
 
-    const retryPrompt =
-      `${req.prompt}\n\n` +
-      `Please answer more thoroughly. Provide 6–10 sentences and include concrete facts (names, dates, locations) where applicable.`;
-
-    const r2 = await callGeminiOnce(req, apiKey, model, retryPrompt);
+    const text =
+      json?.candidates?.[0]?.content?.parts
+        ?.map((p: any) => p?.text ?? "")
+        .join("") ?? "";
 
     return {
       provider: "gemini",
       model,
-      text: r2.ok ? r2.text : r1.text,
-      latencyMs: Date.now() - start,
-      error: r2.ok ? undefined : r2.error,
+      text,
+      latencyMs,
+      error: text ? undefined : undefined,
     };
   },
 };

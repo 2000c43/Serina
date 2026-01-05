@@ -6,20 +6,19 @@ export const PROVIDER_REGISTRY: Record<
 > = {
   openai: {
     label: "ChatGPT",
-    defaultModel: "gpt-4.1",
+    defaultModel: "gpt-5.2",
   },
   anthropic: {
     label: "Claude",
-    // safer default than 3.5-sonnet for many accounts
-    defaultModel: "claude-3-sonnet-20240229",
+    defaultModel: "claude-3-5-opus-latest",
     notes: "Provider auto-falls back if unavailable",
   },
   gemini: {
     label: "Gemini",
-    defaultModel: "gemini-2.5-flash",
+    defaultModel: "gemini-2.5-pro",
   },
   xai: {
     label: "Grok",
-    defaultModel: "grok-4-1-fast-reasoning",
+    defaultModel: "grok-4-1",
   },
 };

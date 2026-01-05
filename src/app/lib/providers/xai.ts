@@ -1,61 +1,87 @@
-import { ProviderRequest, ProviderResponse } from "../types";
+// src/app/lib/providers/xai.ts
+import type { AiProvider, ProviderRequest, ProviderResponse } from "../types";
 
-export const xaiProvider = {
-  name: "Grok",
+// xAI API is OpenAI-compatible for chat completions.
+// Base docs: https://docs.x.ai/docs/overview
+const XAI_API_URL = "https://api.x.ai/v1/chat/completions";
+
+function pickModel(req: ProviderRequest): string {
+  // Your error says grok-beta is deprecated; use grok-3 instead.
+  // Default here is grok-3, but you can override from Settings.
+  return (req.model && req.model.trim()) || "grok-3";
+}
+
+export const xaiProvider: AiProvider = {
+  name: "xai",
+
   async call(req: ProviderRequest, apiKey: string): Promise<ProviderResponse> {
-    const model = req.model?.trim() || "grok-4-1-fast-reasoning";
-    const start = Date.now();
+    const started = Date.now();
 
-    const res = await fetch("https://api.x.ai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        temperature: typeof req.temperature === "number" ? req.temperature : 0.2,
-        max_tokens: typeof req.maxTokens === "number" ? req.maxTokens : 1000,
-        messages: [
-          ...(req.systemPrompt ? [{ role: "system", content: req.systemPrompt }] : []),
-          { role: "user", content: req.prompt },
-        ],
-      }),
-    });
-
-    const latencyMs = Date.now() - start;
-    const text = await res.text();
-
-    if (!res.ok) {
+    if (!apiKey || !apiKey.trim()) {
       return {
         provider: "xai",
-        model,
+        model: req.model ?? "",
         text: "",
-        latencyMs,
-        error: `xAI error: ${res.status} ${text}`,
+        latencyMs: Date.now() - started,
+        error: "xAI API key not set",
       };
     }
 
-    let json: any;
+    const model = pickModel(req);
+    const temperature = typeof req.temperature === "number" ? req.temperature : 0.2;
+
+    // OpenAI-style APIs use max_tokens
+    const maxTokens = typeof req.maxTokens === "number" ? req.maxTokens : 800;
+
+    const system = (req.systemPrompt || "").trim();
+    const user = (req.prompt || "").trim();
+
     try {
-      json = JSON.parse(text);
-    } catch {
+      const res = await fetch(XAI_API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey.trim()}`,
+        },
+        body: JSON.stringify({
+          model,
+          temperature,
+          max_tokens: maxTokens,
+          messages: [
+            ...(system.length ? [{ role: "system", content: system }] : []),
+            { role: "user", content: user },
+          ],
+        }),
+      });
+
+      const raw = await res.text();
+      if (!res.ok) {
+        return {
+          provider: "xai",
+          model,
+          text: "",
+          latencyMs: Date.now() - started,
+          error: `xAI ${res.status}: ${raw}`,
+        };
+      }
+
+      const json = JSON.parse(raw) as any;
+      const text = (json?.choices?.[0]?.message?.content ?? "").toString().trim();
+
+      return {
+        provider: "xai",
+        model,
+        text,
+        latencyMs: Date.now() - started,
+      };
+    } catch (e: any) {
       return {
         provider: "xai",
         model,
         text: "",
-        latencyMs,
-        error: `xAI error: Non-JSON response: ${text.slice(0, 300)}`,
+        latencyMs: Date.now() - started,
+        error: `xAI exception: ${e?.message || String(e)}`,
       };
     }
-
-    const out = json?.choices?.[0]?.message?.content ?? "";
-
-    return {
-      provider: "xai",
-      model,
-      text: (out || "").trim(),
-      latencyMs,
-    };
   },
 };

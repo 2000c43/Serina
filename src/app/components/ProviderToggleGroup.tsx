@@ -7,6 +7,7 @@ const ALL: { id: ProviderName; label: string }[] = [
   { id: "openai", label: "OpenAI" },
   { id: "anthropic", label: "Claude" },
   { id: "gemini", label: "Gemini" },
+  { id: "xai", label: "Grok" },
 ];
 
 interface Props {

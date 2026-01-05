@@ -1,60 +1,30 @@
-import type { ProviderName, AiProvider } from "../types";
+// src/app/lib/providers/index.ts
+import type { ProviderName, AiProvider, ProviderRequest } from "../types";
 
 import { openAiProvider } from "./openai";
 import { anthropicProvider } from "./anthropic";
 import { geminiProvider } from "./gemini";
 import { xaiProvider } from "./xai";
 
-/**
- * IMPORTANT:
- * AiProvider.name is a ProviderName (internal key), NOT a display label.
- * Display labels should be handled in the UI layer.
- */
-
 export const providers: Record<ProviderName, AiProvider> = {
-  openai: {
-    name: "openai",
-    call: openAiProvider.call,
-  },
-  anthropic: {
-    name: "anthropic",
-    call: anthropicProvider.call,
-  },
-  gemini: {
-    name: "gemini",
-    call: geminiProvider.call,
-  },
-  xai: {
-    name: "xai",
-    call: xaiProvider.call,
-  },
+  openai: openAiProvider,
+  anthropic: anthropicProvider,
+  gemini: geminiProvider,
+  xai: xaiProvider,
 };
 
-/**
- * Some routes (e.g. /api/expand) expect this helper.
- */
 export function getProvider(name: ProviderName): AiProvider {
   return providers[name];
 }
 
-/**
- * Convenience helpers (optional but useful).
- */
-export function listProviders(): ProviderName[] {
-  return Object.keys(providers) as ProviderName[];
-}
-
-export function providerLabel(name: ProviderName): string {
-  switch (name) {
-    case "openai":
-      return "ChatGPT";
-    case "anthropic":
-      return "Claude";
-    case "gemini":
-      return "Gemini";
-    case "xai":
-      return "Grok";
-    default:
-      return name;
-  }
+export function normalizeRequest(
+  req: ProviderRequest,
+  defaults: { model?: string; temperature?: number; maxTokens?: number } = {}
+): ProviderRequest {
+  return {
+    ...req,
+    model: (req.model ?? defaults.model)?.toString(),
+    temperature: typeof req.temperature === "number" ? req.temperature : defaults.temperature,
+    maxTokens: typeof req.maxTokens === "number" ? req.maxTokens : defaults.maxTokens,
+  };
 }

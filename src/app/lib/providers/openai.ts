@@ -1,81 +1,62 @@
-import type { ProviderRequest, ProviderResponse } from "../types";
+// src/app/lib/providers/openai.ts
+import type { AiProvider, ProviderRequest, ProviderResponse } from "../types";
 
-export const openAiProvider = {
-  // keep "name" out of this file; index.ts wraps it
+const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
+
+function pickMaxTokenField(model: string) {
+  // GPT-5.x models require max_completion_tokens
+  if (model.startsWith("gpt-5")) return "max_completion_tokens";
+  return "max_tokens";
+}
+
+export const openAiProvider: AiProvider = {
+  name: "openai",
   async call(req: ProviderRequest, apiKey: string): Promise<ProviderResponse> {
-    const model = (req.model?.trim() || "gpt-5.2").trim();
-    const start = Date.now();
+    const t0 = Date.now();
+    const model = req.model || "gpt-5.2";
+    const maxField = pickMaxTokenField(model);
 
-    const input = [
-      ...(req.systemPrompt?.trim()
-        ? [
-            {
-              role: "system",
-              content: [{ type: "input_text", text: req.systemPrompt }],
-            },
-          ]
-        : []),
-      {
-        role: "user",
-        content: [{ type: "input_text", text: req.prompt }],
-      },
-    ];
+    const body: any = {
+      model,
+      messages: [
+        ...(req.systemPrompt ? [{ role: "system", content: req.systemPrompt }] : []),
+        { role: "user", content: req.prompt },
+      ],
+      temperature: typeof req.temperature === "number" ? req.temperature : 0.2,
+    };
 
-    const res = await fetch("https://api.openai.com/v1/responses", {
+    // Use the correct token parameter for the selected model family
+    body[maxField] = typeof req.maxTokens === "number" ? req.maxTokens : 1400;
+
+    const r = await fetch(OPENAI_URL, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        model,
-        input,
-        temperature: typeof req.temperature === "number" ? req.temperature : 0.2,
-        max_output_tokens: typeof req.maxTokens === "number" ? req.maxTokens : 1200,
-      }),
+      body: JSON.stringify(body),
     });
 
-    const latencyMs = Date.now() - start;
-    const raw = await res.text();
-
-    if (!res.ok) {
+    if (!r.ok) {
+      const txt = await r.text();
       return {
         provider: "openai",
         model,
         text: "",
-        latencyMs,
-        error: `OpenAI error: ${res.status} ${raw}`,
+        latencyMs: Date.now() - t0,
+        error: `OpenAI ${r.status}: ${txt}`,
       };
     }
 
-    let json: any;
-    try {
-      json = JSON.parse(raw);
-    } catch {
-      return {
-        provider: "openai",
-        model,
-        text: "",
-        latencyMs,
-        error: `OpenAI error: Non-JSON response: ${raw.slice(0, 300)}`,
-      };
-    }
-
-    // responses api: easiest is output_text if present
-    const out =
-      typeof json?.output_text === "string"
-        ? json.output_text
-        : (json?.output ?? [])
-            .flatMap((o: any) => o?.content ?? [])
-            .filter((c: any) => c?.type === "output_text")
-            .map((c: any) => c?.text ?? "")
-            .join("");
+    const json: any = await r.json();
+    const text: string = json?.choices?.[0]?.message?.content ?? "";
 
     return {
       provider: "openai",
       model,
-      text: (out || "").trim(),
-      latencyMs,
+      text: text || "",
+      latencyMs: Date.now() - t0,
+      error: text ? undefined : "No text returned from provider.",
     };
   },
 };
