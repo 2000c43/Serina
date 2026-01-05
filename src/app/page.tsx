@@ -2,127 +2,104 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import type { ProviderConfigMap, ProviderName, ProviderResponse } from "./lib/types";
+import type {
+  ProviderName,
+  ProviderResponse,
+  RetrievalSource,
+  MetaSummaryResponse,
+  ProviderConfigMap,
+} from "./lib/types";
 import ResponseGrid from "./components/ResponseGrid";
 import SettingsDrawer from "./components/SettingsDrawer";
 
-type WebSnippet = {
-  id: number; // 1-based
-  title: string;
-  url: string;
-  content: string;
-};
-
 const LS_KEYS_KEY = "serina_apiKeys_v1";
 const LS_CONFIG_KEY = "serina_providerConfigs_v1";
+const LS_SELECTED_PROVIDERS_KEY = "serina_selectedProviders_v1";
+const LS_USE_RETRIEVAL_KEY = "serina_useRetrieval_v1";
 
-/**
- * IMPORTANT:
- * If you ever change model naming conventions, add a mapping here so old localStorage
- * settings don't silently break providers.
- */
-function migrateModelName(provider: ProviderName, model: string | undefined): string | undefined {
-  if (!model) return model;
-  const m = model.trim();
-
-  // Anthropic migrations
-  if (provider === "anthropic") {
-    if (m === "claude-3-5-sonnet-latest") return "claude-sonnet-4-5";
-    if (m === "claude-3-5-opus-latest") return "claude-opus-4-1";
-  }
-
-  // xAI migrations
-  if (provider === "xai") {
-    if (m === "grok-beta") return "grok-3";
-    if (m === "grok-4-1") return "grok-3"; // if you don't have access, fall back safely
-    if (m === "grok-4-1-fast-reasoning") return "grok-3";
-  }
-
-  // Gemini migrations (optional)
-  if (provider === "gemini") {
-    if (m === "gemini-pro" || m === "gemini-pro-latest") return "gemini-2.5-pro";
-  }
-
-  // OpenAI migrations (optional)
-  if (provider === "openai") {
-    if (m === "gpt-4.1-mini") return "gpt-5.2";
-  }
-
-  return m;
-}
-
-function migrateConfigs(cfg: ProviderConfigMap): ProviderConfigMap {
-  return {
-    openai: {
-      ...cfg.openai,
-      model: migrateModelName("openai", cfg.openai.model),
-    },
-    anthropic: {
-      ...cfg.anthropic,
-      model: migrateModelName("anthropic", cfg.anthropic.model),
-    },
-    gemini: {
-      ...cfg.gemini,
-      model: migrateModelName("gemini", cfg.gemini.model),
-    },
-    xai: {
-      ...cfg.xai,
-      model: migrateModelName("xai", cfg.xai.model),
-    },
-  };
-}
-
-const defaultConfigs: ProviderConfigMap = {
-  openai: { model: "gpt-5.2", temperature: 0.2, maxTokens: 1400 },
-  anthropic: { model: "claude-sonnet-4-5", temperature: 0.2, maxTokens: 1400 },
-  gemini: { model: "gemini-2.5-pro", temperature: 0.2, maxTokens: 1400 },
-  xai: { model: "grok-3", temperature: 0.2, maxTokens: 1400 },
+const defaultConfigFor = (p: ProviderName) => {
+  if (p === "openai") return { model: "gpt-5.2", temperature: 0.2, maxTokens: 1400 };
+  if (p === "anthropic") return { model: "claude-3-5-sonnet-latest", temperature: 0.2, maxTokens: 1400 };
+  if (p === "gemini") return { model: "gemini-2.5-flash", temperature: 0.2, maxTokens: 1400 };
+  if (p === "xai") return { model: "grok-4-1-fast-reasoning", temperature: 0.2, maxTokens: 1400 };
+  return { model: "", temperature: 0.2, maxTokens: 1400 };
 };
 
 export default function HomePage() {
+  // ---------------------------
+  // Core state
+  // ---------------------------
   const [prompt, setPrompt] = useState("");
   const [results, setResults] = useState<ProviderResponse[]>([]);
   const [loading, setLoading] = useState(false);
 
-  const allProviders: ProviderName[] = useMemo(() => ["openai", "anthropic", "gemini", "xai"], []);
-  const [selectedProviders, setSelectedProviders] = useState<ProviderName[]>(["openai"]);
+  // Summary state
+  const [summary, setSummary] = useState<MetaSummaryResponse | null>(null);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
 
-  const [useRetrieval, setUseRetrieval] = useState(false);
-  const [snippets, setSnippets] = useState<WebSnippet[]>([]);
+  // ---------------------------
+  // Providers
+  // ---------------------------
+  const allProviders: ProviderName[] = useMemo(
+    () => ["openai", "anthropic", "gemini", "xai"],
+    []
+  );
+
+  // Default: all 4 providers ON
+  const [selectedProviders, setSelectedProviders] = useState<ProviderName[]>([
+    "openai",
+    "anthropic",
+    "gemini",
+    "xai",
+  ]);
+
+  // ---------------------------
+  // Retrieval toggle + sources
+  // ---------------------------
+  const [useRetrieval, setUseRetrieval] = useState<boolean>(true); // ✅ default ON
+  const [sources, setSources] = useState<RetrievalSource[]>([]);
   const [usedRetrieval, setUsedRetrieval] = useState(false);
 
+  // ---------------------------
+  // Settings
+  // ---------------------------
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const [apiKeys, setApiKeys] = useState<Partial<Record<ProviderName, string>>>({});
-  const [configs, setConfigs] = useState<ProviderConfigMap>(defaultConfigs);
 
-  // Load saved keys/configs once
+  const [configs, setConfigs] = useState<ProviderConfigMap>({
+    openai: defaultConfigFor("openai"),
+    anthropic: defaultConfigFor("anthropic"),
+    gemini: defaultConfigFor("gemini"),
+    xai: defaultConfigFor("xai"),
+  });
+
+  // ---------------------------
+  // Load localStorage (after mount ONLY to avoid hydration mismatch)
+  // ---------------------------
   useEffect(() => {
     try {
       const rawKeys = localStorage.getItem(LS_KEYS_KEY);
       if (rawKeys) setApiKeys(JSON.parse(rawKeys));
 
       const rawCfg = localStorage.getItem(LS_CONFIG_KEY);
-      if (rawCfg) {
-        const parsed = JSON.parse(rawCfg) as ProviderConfigMap;
-        const migrated = migrateConfigs(parsed);
-        setConfigs({
-          ...defaultConfigs,
-          ...migrated,
-          openai: { ...defaultConfigs.openai, ...migrated.openai },
-          anthropic: { ...defaultConfigs.anthropic, ...migrated.anthropic },
-          gemini: { ...defaultConfigs.gemini, ...migrated.gemini },
-          xai: { ...defaultConfigs.xai, ...migrated.xai },
-        });
-      } else {
-        setConfigs(defaultConfigs);
+      if (rawCfg) setConfigs(JSON.parse(rawCfg));
+
+      const rawSel = localStorage.getItem(LS_SELECTED_PROVIDERS_KEY);
+      if (rawSel) {
+        const parsed = JSON.parse(rawSel);
+        if (Array.isArray(parsed)) setSelectedProviders(parsed);
       }
+
+      const rawRetr = localStorage.getItem(LS_USE_RETRIEVAL_KEY);
+      if (rawRetr != null) setUseRetrieval(rawRetr === "true");
     } catch {
-      setConfigs(defaultConfigs);
+      // ignore
     }
   }, []);
 
-  // Persist keys/configs
+  // Persist localStorage
   useEffect(() => {
     try {
       localStorage.setItem(LS_KEYS_KEY, JSON.stringify(apiKeys));
@@ -135,20 +112,40 @@ export default function HomePage() {
     } catch {}
   }, [configs]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_SELECTED_PROVIDERS_KEY, JSON.stringify(selectedProviders));
+    } catch {}
+  }, [selectedProviders]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_USE_RETRIEVAL_KEY, String(useRetrieval));
+    } catch {}
+  }, [useRetrieval]);
+
+  // ---------------------------
+  // Run query (calls query-stream then meta-summary)
+  // ---------------------------
   const runQuery = useCallback(async () => {
-    if (!prompt.trim()) return;
+    const trimmed = prompt.trim();
+    if (!trimmed) return;
 
     setLoading(true);
     setResults([]);
-    setSnippets([]);
+    setSources([]);
     setUsedRetrieval(false);
+
+    setSummary(null);
+    setSummaryError(null);
+    setSummaryLoading(false);
 
     try {
       const res = await fetch("/api/query-stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          prompt,
+          prompt: trimmed,
           providers: selectedProviders,
           useRetrieval,
           apiKeys,
@@ -157,20 +154,60 @@ export default function HomePage() {
       });
 
       const json = await res.json();
-      setResults(Array.isArray(json?.results) ? json.results : []);
-      setSnippets(Array.isArray(json?.snippets) ? json.snippets : []);
+
+      const nextResults: ProviderResponse[] = Array.isArray(json?.results) ? json.results : [];
+      const nextSources: RetrievalSource[] = Array.isArray(json?.sources)
+        ? json.sources
+        : Array.isArray(json?.snippets)
+        ? json.snippets
+        : [];
+
+      setResults(nextResults);
+      setSources(nextSources);
       setUsedRetrieval(Boolean(json?.usedRetrieval));
-    } catch (err) {
+
+      // Auto-summary
+      setSummaryLoading(true);
+      try {
+        const sRes = await fetch("/api/meta-summary", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt: trimmed,
+            results: nextResults,
+            sources: nextSources,
+            summarizerProvider: "openai",
+          }),
+        });
+
+        const sJson = await sRes.json();
+        if (!sRes.ok) {
+          setSummary(null);
+          setSummaryError(typeof sJson?.error === "string" ? sJson.error : JSON.stringify(sJson));
+        } else {
+          setSummary(sJson as MetaSummaryResponse);
+          setSummaryError(null);
+        }
+      } catch (e: any) {
+        setSummary(null);
+        setSummaryError(String(e?.message || e));
+      } finally {
+        setSummaryLoading(false);
+      }
+    } catch (err: any) {
       console.error(err);
       setResults([]);
-      setSnippets([]);
+      setSources([]);
       setUsedRetrieval(false);
+      setSummary(null);
+      setSummaryError(String(err?.message || err));
+      setSummaryLoading(false);
     } finally {
       setLoading(false);
     }
   }, [prompt, selectedProviders, useRetrieval, apiKeys, configs]);
 
-  // Enter/Return runs (Shift+Enter newline)
+  // Enter runs, Shift+Enter newline
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key === "Enter" && !e.shiftKey) {
@@ -194,18 +231,20 @@ export default function HomePage() {
       </header>
 
       <main className="flex-1 p-6 max-w-5xl mx-auto w-full">
+        {/* Prompt */}
         <div className="mb-4">
           <textarea
-            className="w-full min-h-[100px] border rounded p-3 text-sm"
+            className="w-full min-h-[110px] border rounded p-3 text-sm bg-white"
             placeholder="Ask anything…"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             onKeyDown={onKeyDown}
           />
-          <div className="text-xs opacity-60 mt-1">Tip: Enter to run • Shift+Enter for a new line</div>
+          <div className="text-xs opacity-60 mt-1">Enter to run • Shift+Enter for a new line</div>
         </div>
 
-        <div className="flex items-center gap-4 mb-3">
+        {/* Controls */}
+        <div className="flex items-center gap-4 mb-4">
           <button
             onClick={runQuery}
             disabled={loading}
@@ -215,29 +254,58 @@ export default function HomePage() {
           </button>
 
           <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={useRetrieval} onChange={(e) => setUseRetrieval(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={useRetrieval}
+              onChange={(e) => setUseRetrieval(e.target.checked)}
+            />
             Use retrieval
           </label>
 
-          <div className="text-xs opacity-70">Active: {selectedProviders.join(", ") || "(none)"}</div>
+          <div className="text-xs opacity-70">
+            Active: {selectedProviders.join(", ") || "(none)"}
+          </div>
         </div>
 
+        {/* Summary */}
+        <div className="mb-6 border rounded bg-white p-4">
+          <div className="flex items-center justify-between mb-2">
+            <div className="font-semibold text-sm">Summary</div>
+            {summaryLoading && <div className="text-xs opacity-60">Summarizing…</div>}
+          </div>
+
+          {!summaryLoading && !summary && !summaryError && (
+            <div className="text-sm opacity-70">Run a query to see a summary.</div>
+          )}
+
+          {summaryError && (
+            <div className="text-sm text-red-700 whitespace-pre-wrap">
+              Summary error: {summaryError}
+            </div>
+          )}
+
+          {summary && (
+            <div className="text-sm whitespace-pre-wrap">{summary.finalAnswer || "—"}</div>
+          )}
+        </div>
+
+        {/* Web sources (only show when retrieval is on) */}
         {useRetrieval && (
-          <div className="mb-4 border rounded bg-white p-3">
+          <div className="mb-6 border rounded bg-white p-4">
             <div className="font-semibold text-sm mb-2">
               Web sources {usedRetrieval ? "" : "(none returned — check TAVILY_API_KEY)"}
             </div>
 
-            {snippets.length === 0 ? (
+            {sources.length === 0 ? (
               <div className="text-xs opacity-70">
-                No snippets available. If you expected sources, confirm{" "}
-                <code className="px-1 border rounded">TAVILY_API_KEY</code> is set in{" "}
+                No sources available. If you expected sources, confirm{" "}
+                <code className="px-1 border rounded">TAVILY_API_KEY</code> is set on server or in{" "}
                 <code className="px-1 border rounded">.env.local</code> and restart{" "}
                 <code className="px-1 border rounded">npm run dev</code>.
               </div>
             ) : (
               <div className="flex flex-col gap-3">
-                {snippets.map((s) => (
+                {sources.map((s) => (
                   <div key={s.id} className="border rounded p-3">
                     <div className="text-xs font-semibold mb-1">
                       [{s.id}] {s.title || "Source"}
@@ -249,7 +317,7 @@ export default function HomePage() {
                     ) : (
                       <div className="text-xs opacity-60">(no url)</div>
                     )}
-                    <div className="text-xs mt-2 whitespace-pre-wrap">{s.content}</div>
+                    <div className="text-xs mt-2 whitespace-pre-wrap">{s.snippet || ""}</div>
                   </div>
                 ))}
               </div>
@@ -257,6 +325,7 @@ export default function HomePage() {
           </div>
         )}
 
+        {/* Provider results */}
         <ResponseGrid results={results} loading={loading} selectedProviders={selectedProviders} />
       </main>
 

@@ -1,265 +1,308 @@
+// src/app/api/meta-summary/route.ts
 import { NextResponse } from "next/server";
-import type { ProviderResponse, ProviderName } from "../../lib/types";
-
-export const runtime = "nodejs";
+import type {
+  MetaSummaryResponse,
+  ProviderResponse,
+  RetrievalSource,
+  SummarySentence,
+} from "../../lib/types";
 
 type Body = {
-  originalPrompt?: string;
+  prompt?: string;
   results?: ProviderResponse[];
-  apiKeys?: Partial<Record<ProviderName, string>>;
-  providerConfigs?: any;
-  summarizerProvider?: ProviderName; // unused for now; we summarize with OpenAI if key exists
+  sources?: RetrievalSource[];
 };
 
-function safeString(x: unknown) {
-  return typeof x === "string" ? x : "";
-}
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 
-function normalizeSentence(s: string) {
-  return s
-    .trim()
-    .replace(/\s+/g, " ")
-    // normalize quotes/dashes
-    .replace(/[“”]/g, '"')
-    .replace(/[’]/g, "'")
-    .replace(/[–—]/g, "-")
-    // drop bracket-style citations like [S1] or [1]
-    .replace(/\[\s*[A-Za-z]?\d+\s*\]/g, "")
+function cleanText(s: unknown): string {
+  return String(s ?? "")
+    .replace(/\r\n/g, "\n")
     .trim();
 }
 
-function splitIntoSentences(text: string): string[] {
-  const cleaned = text
-    .replace(/\r/g, "")
-    .replace(/\n{2,}/g, "\n")
-    .replace(/\n/g, " ");
-
-  // naive but solid for our use: split on ". " / "? " / "! "
-  const parts = cleaned.split(/(?<=[.?!])\s+(?=[A-Z0-9"'])/g);
-  return parts.map(normalizeSentence).filter((s) => s.length >= 20);
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
 }
 
-function jaccard(a: string, b: string) {
-  const A = new Set(a.toLowerCase().split(/\W+/).filter(Boolean));
-  const B = new Set(b.toLowerCase().split(/\W+/).filter(Boolean));
-  const inter = [...A].filter((x) => B.has(x)).length;
-  const uni = new Set([...A, ...B]).size;
-  return uni === 0 ? 0 : inter / uni;
-}
+/**
+ * Extract the first complete JSON object from a string.
+ * This survives:
+ * - extra text before/after JSON
+ * - model output that contains multiple JSON objects
+ * - truncation AFTER the first object closes
+ */
+function extractFirstJsonObject(text: string): string | null {
+  const s = text;
+  const start = s.indexOf("{");
+  if (start < 0) return null;
 
-type Fact = {
-  id: string;
-  text: string;
-  providers: ProviderName[];
-};
+  let depth = 0;
+  let inString = false;
+  let escape = false;
 
-function buildFacts(results: ProviderResponse[]): Fact[] {
-  const facts: Fact[] = [];
-  const threshold = 0.72; // similarity threshold for merging
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
 
-  for (const r of results) {
-    const provider = r.provider as ProviderName;
-    const text = safeString(r.text);
-    if (!text.trim() || r.error) continue;
-
-    const sents = splitIntoSentences(text);
-
-    for (const s of sents) {
-      // skip obviously meta / filler
-      const lower = s.toLowerCase();
-      if (
-        lower.startsWith("based on the information provided") ||
-        lower.startsWith("based on the web sources") ||
-        lower.includes("would you like to know more")
-      ) {
+    if (inString) {
+      if (escape) {
+        escape = false;
+      } else if (ch === "\\") {
+        escape = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    } else {
+      if (ch === '"') {
+        inString = true;
         continue;
       }
+      if (ch === "{") depth++;
+      if (ch === "}") depth--;
 
-      // Try to merge into existing fact
-      let merged = false;
-      for (const f of facts) {
-        if (jaccard(f.text, s) >= threshold) {
-          if (!f.providers.includes(provider)) f.providers.push(provider);
-          merged = true;
-          break;
-        }
-      }
-
-      if (!merged) {
-        facts.push({
-          id: `f${facts.length + 1}`,
-          text: s,
-          providers: [provider],
-        });
+      if (depth === 0) {
+        return s.slice(start, i + 1);
       }
     }
   }
 
-  // Sort: most-supported first, then longer (often more specific)
-  facts.sort((a, b) => {
-    const d = b.providers.length - a.providers.length;
-    if (d !== 0) return d;
-    return b.text.length - a.text.length;
-  });
-
-  return facts.slice(0, 40); // keep prompt bounded
-}
-
-function fallbackSummary(originalPrompt: string, results: ProviderResponse[]): string {
-  const facts = buildFacts(results);
-  const lines: string[] = [];
-  lines.push(`Prompt: ${originalPrompt}`);
-  lines.push("");
-
-  if (facts.length === 0) {
-    lines.push("No usable provider text returned to summarize.");
-    const errs = results.filter((r) => r.error).map((r) => `- ${r.provider}: ${r.error}`);
-    if (errs.length) lines.push("", "Errors:", ...errs);
-    return lines.join("\n");
-  }
-
-  lines.push("Key facts (deduped):");
-  for (const f of facts.slice(0, 12)) {
-    lines.push(`- ${f.text} (from: ${f.providers.join(", ")})`);
-  }
-
-  const unique = facts.filter((f) => f.providers.length === 1).slice(0, 8);
-  if (unique.length) {
-    lines.push("");
-    lines.push("Unique details (single-source):");
-    for (const f of unique) {
-      lines.push(`- ${f.text} (from: ${f.providers[0]})`);
-    }
-  }
-
-  return lines.join("\n");
-}
-
-async function openAiSummarize(args: {
-  apiKey: string;
-  originalPrompt: string;
-  results: ProviderResponse[];
-}) {
-  const { apiKey, originalPrompt, results } = args;
-
-  const facts = buildFacts(results);
-
-  // Separate consensus vs unique facts
-  const consensus = facts.filter((f) => f.providers.length >= 2).slice(0, 14);
-  const unique = facts.filter((f) => f.providers.length === 1).slice(0, 14);
-
-  const payload = {
-    model: "gpt-5.2",
-    input: [
-      {
-        role: "system",
-        content: [
-          {
-            type: "input_text",
-            text:
-              "You are a synthesis engine for a multi-provider AI meta-search app.\n" +
-              "Goal: produce an answer that MOVES FORWARD:\n" +
-              "- Keep it readable and non-repetitive.\n" +
-              "- Include ALL important unique facts, not just consensus.\n" +
-              "- If a fact is only in one provider, include it but phrase cautiously (e.g., 'One source reports…').\n" +
-              "- If providers conflict, explicitly mention the conflict.\n" +
-              "- Do NOT show bracket citations like [1] or [S1].\n" +
-              "- Do NOT show confidence percentages.\n" +
-              "\n" +
-              "Output format:\n" +
-              "1) Final answer (6–10 sentences)\n" +
-              "2) Extra details (bullets, include the most useful single-source facts)\n" +
-              "3) Conflicts / uncertainties (bullets; 'none' if none)\n",
-          },
-        ],
-      },
-      {
-        role: "user",
-        content: [
-          {
-            type: "input_text",
-            text:
-              `USER PROMPT:\n${originalPrompt}\n\n` +
-              `CONSENSUS FACTS (appear in 2+ providers):\n` +
-              consensus.map((f) => `- ${f.text} (providers: ${f.providers.join(", ")})`).join("\n") +
-              `\n\nUNIQUE FACTS (single provider; include cautiously if relevant):\n` +
-              unique.map((f) => `- ${f.text} (provider: ${f.providers[0]})`).join("\n"),
-          },
-        ],
-      },
-    ],
-    temperature: 0.2,
-    max_output_tokens: 900,
-  };
-
-  const res = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const raw = await res.text();
-  if (!res.ok) throw new Error(`OpenAI meta-summary error ${res.status}: ${raw}`);
-
-  const json = JSON.parse(raw);
-  const out =
-    typeof json?.output_text === "string"
-      ? json.output_text
-      : (json?.output ?? [])
-          .flatMap((o: any) => o?.content ?? [])
-          .filter((c: any) => c?.type === "output_text")
-          .map((c: any) => c?.text ?? "")
-          .join("");
-
-  return (out || "").trim();
+  // No complete object found
+  return null;
 }
 
 export async function POST(req: Request) {
-  let body: Body;
   try {
-    body = (await req.json()) as Body;
-  } catch {
-    return NextResponse.json({ ok: false, error: "Invalid JSON body" }, { status: 400 });
-  }
-
-  const originalPrompt = safeString(body.originalPrompt).trim();
-  const results = Array.isArray(body.results) ? body.results : [];
-  const apiKeys = body.apiKeys ?? {};
-
-  if (!originalPrompt) {
-    return NextResponse.json({ ok: false, error: "Missing originalPrompt" }, { status: 400 });
-  }
-
-  if (results.length === 0) {
-    return NextResponse.json(
-      { ok: true, summary: "No provider results were returned, so there is nothing to summarize." },
-      { status: 200 }
-    );
-  }
-
-  const openAiKey = apiKeys.openai;
-
-  // Prefer OpenAI summarizer if available; otherwise deterministic fallback
-  if (openAiKey && typeof openAiKey === "string" && openAiKey.trim().length > 0) {
-    try {
-      const summary = await openAiSummarize({
-        apiKey: openAiKey.trim(),
-        originalPrompt,
-        results,
-      });
-      return NextResponse.json({ ok: true, summary }, { status: 200 });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      const summary = fallbackSummary(originalPrompt, results);
+    if (!OPENAI_API_KEY) {
       return NextResponse.json(
-        { ok: true, summary: `${summary}\n\n(meta-summary fallback due to error: ${msg})` },
-        { status: 200 }
+        { error: "OPENAI_API_KEY not set on server" },
+        { status: 500 }
       );
     }
-  }
 
-  return NextResponse.json({ ok: true, summary: fallbackSummary(originalPrompt, results) }, { status: 200 });
+    const body = (await req.json()) as Body;
+
+    const prompt = cleanText(body.prompt);
+    if (!prompt) {
+      return NextResponse.json({ error: "Missing prompt." }, { status: 400 });
+    }
+
+    const results: ProviderResponse[] = Array.isArray(body.results) ? body.results : [];
+    const sources: RetrievalSource[] = Array.isArray(body.sources) ? body.sources : [];
+
+    // Build a compact evidence pack from providers
+    const providerSection = results
+      .map((r) => {
+        const txt = cleanText(r.text);
+        const err = cleanText(r.error);
+        const status = err ? `ERROR: ${err}` : txt ? "OK" : "EMPTY";
+        return [
+          `PROVIDER: ${r.provider}`,
+          `MODEL: ${r.model || "n/a"}`,
+          `STATUS: ${status}`,
+          txt ? `ANSWER:\n${txt}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n");
+      })
+      .join("\n\n---\n\n");
+
+    // Include web sources (optional) – but we will NOT ask model to emit a sources array.
+    const sourcesSection =
+      sources.length > 0
+        ? sources
+            .slice(0, 10)
+            .map((s) => {
+              const id = typeof s.id === "number" ? s.id : 0;
+              const title = cleanText(s.title) || "Source";
+              const url = cleanText(s.url);
+              const snip = cleanText((s as any).snippet);
+              return [
+                `[${id}] ${title}`,
+                url ? url : "",
+                snip ? `SNIPPET:\n${snip}` : "",
+              ]
+                .filter(Boolean)
+                .join("\n");
+            })
+            .join("\n\n")
+        : "";
+
+    // System prompt: general-purpose synthesis; no “tuning” to any topic.
+    // Key change: DO NOT output "sources" field (we attach sources ourselves).
+    const system = `
+You are a meta-summarizer for a multi-provider AI app.
+
+GOAL:
+Given a user prompt, multiple provider answers, and optional web snippets, produce the best possible final answer.
+
+RULES:
+- Do NOT refuse unless the user request is genuinely unsafe or prohibited.
+- Answer directly when possible.
+- Prefer provider answers over snippets when they conflict.
+- If answers conflict, explicitly note the disagreement and choose the most likely correct option.
+- Do not invent facts. If unsure, clearly state uncertainty and what would confirm it.
+- Write a helpful answer that is NOT overly short.
+
+OUTPUT REQUIREMENTS:
+Return STRICT JSON (no markdown) with this schema ONLY:
+{
+  "finalAnswer": string,                 // 8–12 sentences, readable
+  "keyFacts": string[],                  // 6–12 bullets, no duplicates
+  "sentences": { "text": string, "citations": number[], "confidence": number }[],
+  "disagreements": string[]              // list conflicts/uncertainties
+}
+
+CITATIONS:
+- citations is an array of web source ids like [1,2].
+- If no web snippets were provided, citations should be [].
+
+CONFIDENCE:
+- 0..100 integer.
+
+Keep JSON valid. Do NOT include any additional keys.
+`.trim();
+
+    const user = `
+USER PROMPT:
+${prompt}
+
+PROVIDER ANSWERS:
+${providerSection || "(none)"}
+
+WEB SOURCES (optional):
+${sourcesSection || "(none)"}
+`.trim();
+
+    const payload = {
+      model: "gpt-5.2",
+      input: [
+        { role: "system", content: [{ type: "input_text", text: system }] },
+        { role: "user", content: [{ type: "input_text", text: user }] },
+      ],
+      text: {
+        format: { type: "json_object" },
+      },
+      max_output_tokens: 900,
+      temperature: 0.2,
+    };
+
+    const r = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const raw = await r.text();
+
+    if (!r.ok) {
+      return NextResponse.json(
+        { error: `OpenAI meta-summary error ${r.status}: ${raw}` },
+        { status: 500 }
+      );
+    }
+
+    // Parse wrapper JSON and extract output_text
+    let outputText = "";
+    try {
+      const parsed = JSON.parse(raw);
+      const out = parsed?.output ?? [];
+      for (const item of out) {
+        const content = item?.content ?? [];
+        for (const c of content) {
+          if (c?.type === "output_text" && typeof c?.text === "string") {
+            outputText += c.text;
+          }
+        }
+      }
+      outputText = cleanText(outputText);
+    } catch (e: any) {
+      return NextResponse.json(
+        {
+          error: `Failed to parse Responses API wrapper JSON: ${String(e?.message || e)}\nRAW:\n${raw}`,
+        },
+        { status: 500 }
+      );
+    }
+
+    if (!outputText) {
+      return NextResponse.json(
+        { error: "Meta-summary returned empty output_text." },
+        { status: 500 }
+      );
+    }
+
+    // Extract the first complete JSON object (robust to extra text or truncation later)
+    const extracted = extractFirstJsonObject(outputText);
+    if (!extracted) {
+      return NextResponse.json(
+        { error: `Meta-summary did not contain a complete JSON object.\nTEXT:\n${outputText}` },
+        { status: 500 }
+      );
+    }
+
+    let outObj: any;
+    try {
+      outObj = JSON.parse(extracted);
+    } catch (e: any) {
+      return NextResponse.json(
+        {
+          error: `Meta-summary did not return valid JSON: ${String(e?.message || e)}\nTEXT:\n${extracted}`,
+        },
+        { status: 500 }
+      );
+    }
+
+    // Normalize
+    const finalAnswer = cleanText(outObj.finalAnswer);
+
+    const keyFacts = Array.isArray(outObj.keyFacts)
+      ? outObj.keyFacts.map(cleanText).filter(Boolean).slice(0, 20)
+      : [];
+
+    const disagreements = Array.isArray(outObj.disagreements)
+      ? outObj.disagreements.map(cleanText).filter(Boolean).slice(0, 20)
+      : [];
+
+    const sentences: SummarySentence[] = Array.isArray(outObj.sentences)
+      ? outObj.sentences
+          .map((s: any) => ({
+            text: cleanText(s?.text),
+            citations: Array.isArray(s?.citations)
+              ? s.citations
+                  .filter((n: any) => Number.isFinite(n))
+                  .map((n: any) => Number(n))
+              : [],
+            confidence: clamp(Number(s?.confidence ?? 0), 0, 100),
+          }))
+          .filter((s: SummarySentence) => s.text.length > 0)
+          .slice(0, 40)
+      : [];
+
+    // Attach sources from input (authoritative), not from the model
+    const normalizedSources: RetrievalSource[] = sources.map((s) => ({
+      id: s.id,
+      title: s.title,
+      url: s.url,
+      snippet: (s as any).snippet,
+    }));
+
+    const response: MetaSummaryResponse = {
+      finalAnswer: finalAnswer || "(No answer returned.)",
+      keyFacts,
+      sentences,
+      disagreements,
+      sources: normalizedSources,
+    };
+
+    return NextResponse.json(response);
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: `meta-summary route error: ${String(err?.message || err)}` },
+      { status: 500 }
+    );
+  }
 }
