@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Keep default SSR/Route Handlers enabled (your /api routes require this)
 };
 
 export default nextConfig;

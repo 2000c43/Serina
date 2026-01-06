@@ -2,82 +2,59 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import type {
-  ProviderName,
-  ProviderResponse,
-  RetrievalSource,
-  MetaSummaryResponse,
-  ProviderConfigMap,
-} from "./lib/types";
+import type { ProviderConfigMap, ProviderName, ProviderResponse } from "./lib/types";
 import ResponseGrid from "./components/ResponseGrid";
 import SettingsDrawer from "./components/SettingsDrawer";
+
+type WebSnippet = {
+  id: number; // 1-based
+  title: string;
+  url: string;
+  content: string;
+};
+
+type ProviderConfig = {
+  model: string;
+  temperature: number;
+  maxTokens: number;
+};
 
 const LS_KEYS_KEY = "serina_apiKeys_v1";
 const LS_CONFIG_KEY = "serina_providerConfigs_v1";
 const LS_SELECTED_PROVIDERS_KEY = "serina_selectedProviders_v1";
 const LS_USE_RETRIEVAL_KEY = "serina_useRetrieval_v1";
 
-const defaultConfigFor = (p: ProviderName) => {
+const defaultConfigFor = (p: ProviderName): ProviderConfig => {
   if (p === "openai") return { model: "gpt-5.2", temperature: 0.2, maxTokens: 1400 };
-  if (p === "anthropic") return { model: "claude-3-5-sonnet-latest", temperature: 0.2, maxTokens: 1400 };
+  if (p === "anthropic") return { model: "claude-3-5-haiku-latest", temperature: 0.2, maxTokens: 1400 };
   if (p === "gemini") return { model: "gemini-2.5-flash", temperature: 0.2, maxTokens: 1400 };
-  if (p === "xai") return { model: "grok-4-1-fast-reasoning", temperature: 0.2, maxTokens: 1400 };
+  if (p === "xai") return { model: "grok-3", temperature: 0.2, maxTokens: 1400 };
   return { model: "", temperature: 0.2, maxTokens: 1400 };
 };
 
 export default function HomePage() {
-  // ---------------------------
-  // Core state
-  // ---------------------------
   const [prompt, setPrompt] = useState("");
   const [results, setResults] = useState<ProviderResponse[]>([]);
   const [loading, setLoading] = useState(false);
 
-  // Summary state
-  const [summary, setSummary] = useState<MetaSummaryResponse | null>(null);
-  const [summaryError, setSummaryError] = useState<string | null>(null);
-  const [summaryLoading, setSummaryLoading] = useState(false);
+  const allProviders: ProviderName[] = useMemo(() => ["openai", "anthropic", "gemini", "xai"], []);
+  const [selectedProviders, setSelectedProviders] = useState<ProviderName[]>(allProviders);
 
-  // ---------------------------
-  // Providers
-  // ---------------------------
-  const allProviders: ProviderName[] = useMemo(
-    () => ["openai", "anthropic", "gemini", "xai"],
-    []
-  );
-
-  // Default: all 4 providers ON
-  const [selectedProviders, setSelectedProviders] = useState<ProviderName[]>([
-    "openai",
-    "anthropic",
-    "gemini",
-    "xai",
-  ]);
-
-  // ---------------------------
-  // Retrieval toggle + sources
-  // ---------------------------
-  const [useRetrieval, setUseRetrieval] = useState<boolean>(true); // ✅ default ON
-  const [sources, setSources] = useState<RetrievalSource[]>([]);
+  const [useRetrieval, setUseRetrieval] = useState(true);
+  const [snippets, setSnippets] = useState<WebSnippet[]>([]);
   const [usedRetrieval, setUsedRetrieval] = useState(false);
 
-  // ---------------------------
-  // Settings
-  // ---------------------------
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const [apiKeys, setApiKeys] = useState<Partial<Record<ProviderName, string>>>({});
-
-  const [configs, setConfigs] = useState<ProviderConfigMap>({
+  const [configs, setConfigs] = useState<ProviderConfigMap>(() => ({
     openai: defaultConfigFor("openai"),
     anthropic: defaultConfigFor("anthropic"),
     gemini: defaultConfigFor("gemini"),
     xai: defaultConfigFor("xai"),
-  });
+  }));
 
-  // ---------------------------
-  // Load localStorage (after mount ONLY to avoid hydration mismatch)
-  // ---------------------------
+  // Load saved state
   useEffect(() => {
     try {
       const rawKeys = localStorage.getItem(LS_KEYS_KEY);
@@ -87,19 +64,17 @@ export default function HomePage() {
       if (rawCfg) setConfigs(JSON.parse(rawCfg));
 
       const rawSel = localStorage.getItem(LS_SELECTED_PROVIDERS_KEY);
-      if (rawSel) {
-        const parsed = JSON.parse(rawSel);
-        if (Array.isArray(parsed)) setSelectedProviders(parsed);
-      }
+      if (rawSel) setSelectedProviders(JSON.parse(rawSel));
 
       const rawRetr = localStorage.getItem(LS_USE_RETRIEVAL_KEY);
-      if (rawRetr != null) setUseRetrieval(rawRetr === "true");
+      if (rawRetr) setUseRetrieval(JSON.parse(rawRetr));
     } catch {
       // ignore
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Persist localStorage
+  // Persist
   useEffect(() => {
     try {
       localStorage.setItem(LS_KEYS_KEY, JSON.stringify(apiKeys));
@@ -120,32 +95,24 @@ export default function HomePage() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(LS_USE_RETRIEVAL_KEY, String(useRetrieval));
+      localStorage.setItem(LS_USE_RETRIEVAL_KEY, JSON.stringify(useRetrieval));
     } catch {}
   }, [useRetrieval]);
 
-  // ---------------------------
-  // Run query (calls query-stream then meta-summary)
-  // ---------------------------
   const runQuery = useCallback(async () => {
-    const trimmed = prompt.trim();
-    if (!trimmed) return;
+    if (!prompt.trim()) return;
 
     setLoading(true);
     setResults([]);
-    setSources([]);
+    setSnippets([]);
     setUsedRetrieval(false);
-
-    setSummary(null);
-    setSummaryError(null);
-    setSummaryLoading(false);
 
     try {
       const res = await fetch("/api/query-stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          prompt: trimmed,
+          prompt,
           providers: selectedProviders,
           useRetrieval,
           apiKeys,
@@ -155,59 +122,24 @@ export default function HomePage() {
 
       const json = await res.json();
 
-      const nextResults: ProviderResponse[] = Array.isArray(json?.results) ? json.results : [];
-      const nextSources: RetrievalSource[] = Array.isArray(json?.sources)
-        ? json.sources
-        : Array.isArray(json?.snippets)
-        ? json.snippets
-        : [];
+      if (Array.isArray(json?.results)) setResults(json.results);
+      else setResults([]);
 
-      setResults(nextResults);
-      setSources(nextSources);
+      if (Array.isArray(json?.snippets)) setSnippets(json.snippets);
+      else setSnippets([]);
+
       setUsedRetrieval(Boolean(json?.usedRetrieval));
-
-      // Auto-summary
-      setSummaryLoading(true);
-      try {
-        const sRes = await fetch("/api/meta-summary", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            prompt: trimmed,
-            results: nextResults,
-            sources: nextSources,
-            summarizerProvider: "openai",
-          }),
-        });
-
-        const sJson = await sRes.json();
-        if (!sRes.ok) {
-          setSummary(null);
-          setSummaryError(typeof sJson?.error === "string" ? sJson.error : JSON.stringify(sJson));
-        } else {
-          setSummary(sJson as MetaSummaryResponse);
-          setSummaryError(null);
-        }
-      } catch (e: any) {
-        setSummary(null);
-        setSummaryError(String(e?.message || e));
-      } finally {
-        setSummaryLoading(false);
-      }
-    } catch (err: any) {
+    } catch (err) {
       console.error(err);
       setResults([]);
-      setSources([]);
+      setSnippets([]);
       setUsedRetrieval(false);
-      setSummary(null);
-      setSummaryError(String(err?.message || err));
-      setSummaryLoading(false);
     } finally {
       setLoading(false);
     }
   }, [prompt, selectedProviders, useRetrieval, apiKeys, configs]);
 
-  // Enter runs, Shift+Enter newline
+  // Enter = Run (Shift+Enter newline)
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key === "Enter" && !e.shiftKey) {
@@ -219,8 +151,8 @@ export default function HomePage() {
   );
 
   return (
-    <div className="min-h-screen flex flex-col bg-gray-50 text-gray-900">
-      <header className="flex items-center justify-between px-6 py-4 border-b bg-white">
+    <div className="min-h-[100dvh] flex flex-col bg-gray-50 text-gray-900 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
+      <header className="flex items-center justify-between px-6 py-4 border-b bg-white pt-[env(safe-area-inset-top)]">
         <h1 className="text-lg font-semibold">Serina</h1>
         <button
           onClick={() => setSettingsOpen(true)}
@@ -231,10 +163,10 @@ export default function HomePage() {
       </header>
 
       <main className="flex-1 p-6 max-w-5xl mx-auto w-full">
-        {/* Prompt */}
         <div className="mb-4">
           <textarea
-            className="w-full min-h-[110px] border rounded p-3 text-sm bg-white"
+            // IMPORTANT: iOS will auto-zoom inputs < 16px. Use text-base (16px).
+            className="w-full min-h-[100px] border rounded p-3 text-base"
             placeholder="Ask anything…"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
@@ -243,8 +175,7 @@ export default function HomePage() {
           <div className="text-xs opacity-60 mt-1">Enter to run • Shift+Enter for a new line</div>
         </div>
 
-        {/* Controls */}
-        <div className="flex items-center gap-4 mb-4">
+        <div className="flex items-center gap-4 mb-3">
           <button
             onClick={runQuery}
             disabled={loading}
@@ -254,58 +185,24 @@ export default function HomePage() {
           </button>
 
           <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={useRetrieval}
-              onChange={(e) => setUseRetrieval(e.target.checked)}
-            />
+            <input type="checkbox" checked={useRetrieval} onChange={(e) => setUseRetrieval(e.target.checked)} />
             Use retrieval
           </label>
 
-          <div className="text-xs opacity-70">
-            Active: {selectedProviders.join(", ") || "(none)"}
-          </div>
+          <div className="text-xs opacity-70">Active: {selectedProviders.join(", ") || "(none)"}</div>
         </div>
 
-        {/* Summary */}
-        <div className="mb-6 border rounded bg-white p-4">
-          <div className="flex items-center justify-between mb-2">
-            <div className="font-semibold text-sm">Summary</div>
-            {summaryLoading && <div className="text-xs opacity-60">Summarizing…</div>}
-          </div>
-
-          {!summaryLoading && !summary && !summaryError && (
-            <div className="text-sm opacity-70">Run a query to see a summary.</div>
-          )}
-
-          {summaryError && (
-            <div className="text-sm text-red-700 whitespace-pre-wrap">
-              Summary error: {summaryError}
-            </div>
-          )}
-
-          {summary && (
-            <div className="text-sm whitespace-pre-wrap">{summary.finalAnswer || "—"}</div>
-          )}
-        </div>
-
-        {/* Web sources (only show when retrieval is on) */}
         {useRetrieval && (
-          <div className="mb-6 border rounded bg-white p-4">
+          <div className="mb-4 border rounded bg-white p-3">
             <div className="font-semibold text-sm mb-2">
               Web sources {usedRetrieval ? "" : "(none returned — check TAVILY_API_KEY)"}
             </div>
 
-            {sources.length === 0 ? (
-              <div className="text-xs opacity-70">
-                No sources available. If you expected sources, confirm{" "}
-                <code className="px-1 border rounded">TAVILY_API_KEY</code> is set on server or in{" "}
-                <code className="px-1 border rounded">.env.local</code> and restart{" "}
-                <code className="px-1 border rounded">npm run dev</code>.
-              </div>
+            {snippets.length === 0 ? (
+              <div className="text-xs opacity-70">No snippets available.</div>
             ) : (
               <div className="flex flex-col gap-3">
-                {sources.map((s) => (
+                {snippets.map((s) => (
                   <div key={s.id} className="border rounded p-3">
                     <div className="text-xs font-semibold mb-1">
                       [{s.id}] {s.title || "Source"}
@@ -317,7 +214,7 @@ export default function HomePage() {
                     ) : (
                       <div className="text-xs opacity-60">(no url)</div>
                     )}
-                    <div className="text-xs mt-2 whitespace-pre-wrap">{s.snippet || ""}</div>
+                    <div className="text-xs mt-2 whitespace-pre-wrap">{s.content}</div>
                   </div>
                 ))}
               </div>
@@ -325,7 +222,6 @@ export default function HomePage() {
           </div>
         )}
 
-        {/* Provider results */}
         <ResponseGrid results={results} loading={loading} selectedProviders={selectedProviders} />
       </main>
 

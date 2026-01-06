@@ -1,13 +1,21 @@
-/* src/app/globals.css */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
-/* Tailwind v4 uses this single import */
-@import "tailwindcss";
-
-/* Optional: small sane defaults */
-html, body {
-  height: 100%;
+/* -------------------------------------------------------
+   iOS Safari / WKWebView: prevent "focus zoom" on inputs
+   iOS auto-zooms when font-size < 16px on input/textarea.
+   Keep desktop styles unchanged.
+-------------------------------------------------------- */
+@supports (-webkit-touch-callout: none) {
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
 }
 
-body {
-  margin: 0;
+/* Optional: helps prevent weird text-size adjustments */
+html {
+  -webkit-text-size-adjust: 100%;
 }
