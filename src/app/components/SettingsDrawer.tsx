@@ -19,16 +19,12 @@ type Props = {
   setConfigs: React.Dispatch<React.SetStateAction<ProviderConfigMap>>;
 };
 
-const PROVIDER_LABEL: Record<ProviderName, string> = {
-  openai: "ChatGPT (OpenAI)",
-  anthropic: "Claude (Anthropic)",
-  gemini: "Gemini (Google)",
-  xai: "Grok (xAI)",
-};
-
-function clampNumber(v: string, fallback: number) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
+function labelForProvider(p: ProviderName) {
+  if (p === "openai") return "OpenAI";
+  if (p === "anthropic") return "Anthropic";
+  if (p === "gemini") return "Gemini";
+  if (p === "xai") return "xAI";
+  return p;
 }
 
 export default function SettingsDrawer({
@@ -42,7 +38,17 @@ export default function SettingsDrawer({
   configs,
   setConfigs,
 }: Props) {
-  // Prevent background scroll when modal open
+  // Close on ESC
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [open, onClose]);
+
+  // Prevent background scroll while open
   useEffect(() => {
     if (!open) return;
     const prev = document.body.style.overflow;
@@ -52,170 +58,277 @@ export default function SettingsDrawer({
     };
   }, [open]);
 
-  const providerRows = useMemo(() => {
-    return allProviders.map((p) => {
-      const cfg = configs[p] ?? { model: "", temperature: 0.2, maxTokens: 1400 };
-      const keyVal = apiKeys[p] ?? "";
-      const enabled = selectedProviders.includes(p);
-      return { p, cfg, keyVal, enabled };
-    });
-  }, [allProviders, configs, apiKeys, selectedProviders]);
+  const providerTabs = useMemo(
+    () => allProviders.map((p) => ({ key: p, label: labelForProvider(p) })),
+    [allProviders]
+  );
 
   if (!open) return null;
 
-  return (
-    <div className="fixed inset-0 z-50">
-      {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-black/40"
-        onClick={onClose}
-        aria-hidden="true"
-      />
+  const overlayStyle: React.CSSProperties = {
+    position: "fixed",
+    inset: 0,
+    zIndex: 9999,
+    background: "rgba(0,0,0,0.45)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 16,
+  };
 
-      {/* Modal */}
-      <div className="absolute inset-0 flex items-center justify-center p-4">
-        <div className="w-full max-w-2xl max-h-[85vh] overflow-hidden rounded-xl border-2 border-green-400 bg-white shadow-xl">
-          {/* Header */}
-          <div className="flex items-center justify-between px-4 py-3 border-b">
-            <div>
-              <div className="text-base font-semibold">Settings</div>
-              <div className="text-xs text-gray-600">
-                Keys/configs are saved locally in your browser (localStorage).
-              </div>
+  const panelStyle: React.CSSProperties = {
+    width: "min(920px, 96vw)",
+    maxHeight: "82vh",
+    overflow: "hidden",
+    borderRadius: 14,
+    background: "white",
+    border: "3px solid #22c55e", // green border
+    boxShadow: "0 12px 40px rgba(0,0,0,0.25)",
+    display: "flex",
+    flexDirection: "column",
+  };
+
+  const headerStyle: React.CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    padding: "14px 16px",
+    borderBottom: "1px solid #e5e7eb",
+  };
+
+  const bodyStyle: React.CSSProperties = {
+    padding: 16,
+    overflow: "auto",
+  };
+
+  const sectionTitleStyle: React.CSSProperties = {
+    fontWeight: 700,
+    margin: "14px 0 8px",
+  };
+
+  const rowStyle: React.CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  };
+
+  const labelStyle: React.CSSProperties = {
+    fontSize: 12,
+    opacity: 0.8,
+    marginBottom: 6,
+  };
+
+  const inputStyle: React.CSSProperties = {
+    width: "100%",
+    border: "1px solid #d1d5db",
+    borderRadius: 10,
+    padding: "10px 12px",
+    fontSize: 14,
+    outline: "none",
+  };
+
+  const smallNoteStyle: React.CSSProperties = {
+    fontSize: 12,
+    opacity: 0.65,
+    marginTop: 6,
+    lineHeight: 1.35,
+  };
+
+  const tabWrapStyle: React.CSSProperties = {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 8,
+  };
+
+  const tabStyle = (active: boolean): React.CSSProperties => ({
+    padding: "6px 10px",
+    borderRadius: 10,
+    border: "1px solid #d1d5db",
+    background: active ? "#111827" : "white",
+    color: active ? "white" : "#111827",
+    fontSize: 13,
+    cursor: "pointer",
+    userSelect: "none",
+  });
+
+  const checkboxLineStyle: React.CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    fontSize: 14,
+  };
+
+  const cardStyle: React.CSSProperties = {
+    border: "1px solid #e5e7eb",
+    borderRadius: 12,
+    padding: 12,
+    background: "#fafafa",
+    marginTop: 10,
+  };
+
+  const toggleProvider = (p: ProviderName) => {
+    setSelectedProviders((prev) => {
+      const set = new Set(prev);
+      if (set.has(p)) set.delete(p);
+      else set.add(p);
+      return Array.from(set);
+    });
+  };
+
+  const updateApiKey = (p: ProviderName, val: string) => {
+    setApiKeys((prev) => ({ ...prev, [p]: val }));
+  };
+
+  const updateConfigField = (
+    p: ProviderName,
+    field: "model" | "temperature" | "maxTokens",
+    val: string
+  ) => {
+    setConfigs((prev) => {
+      const next = { ...prev };
+      const current = next[p] ?? {};
+      if (field === "temperature") {
+        const n = Number(val);
+        next[p] = { ...current, temperature: Number.isFinite(n) ? n : 0 };
+      } else if (field === "maxTokens") {
+        const n = Number(val);
+        next[p] = { ...current, maxTokens: Number.isFinite(n) ? n : 0 };
+      } else {
+        next[p] = { ...current, model: val };
+      }
+      return next;
+    });
+  };
+
+  return (
+    <div
+      style={overlayStyle}
+      onClick={() => onClose()} // click outside closes
+      role="dialog"
+      aria-modal="true"
+      aria-label="Settings"
+    >
+      <div
+        style={panelStyle}
+        onClick={(e) => e.stopPropagation()} // prevent overlay close when clicking inside
+      >
+        <div style={headerStyle}>
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 16 }}>Settings</div>
+            <div style={{ fontSize: 12, opacity: 0.7, marginTop: 2 }}>
+              Providers • Models • API keys (stored locally)
             </div>
-            <button
-              onClick={onClose}
-              className="text-sm px-3 py-1.5 rounded border hover:bg-gray-50"
-            >
-              Close
-            </button>
           </div>
 
-          {/* Body */}
-          <div className="p-4 overflow-y-auto max-h-[calc(85vh-56px)]">
-            {/* Providers selection */}
-            <div className="mb-5">
-              <div className="text-sm font-semibold mb-2">Enabled providers</div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {allProviders.map((p, i) => (
-                  <label
-                    key={`${p}-${i}`}
-                    className="flex items-center gap-2 border rounded px-3 py-2 text-sm"
-                  >
+          <button
+            onClick={onClose}
+            style={{
+              border: "1px solid #d1d5db",
+              background: "white",
+              borderRadius: 10,
+              padding: "8px 12px",
+              fontSize: 13,
+              cursor: "pointer",
+            }}
+          >
+            Close
+          </button>
+        </div>
+
+        <div style={bodyStyle}>
+          <div style={sectionTitleStyle}>Active providers</div>
+          <div style={tabWrapStyle}>
+            {providerTabs.map((t) => {
+              const active = selectedProviders.includes(t.key);
+              return (
+                <div
+                  key={t.key}
+                  style={tabStyle(active)}
+                  onClick={() => toggleProvider(t.key)}
+                >
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
                     <input
                       type="checkbox"
-                      checked={selectedProviders.includes(p)}
-                      onChange={(e) => {
-                        const checked = e.target.checked;
-                        setSelectedProviders((prev) => {
-                          if (checked) return Array.from(new Set([...prev, p]));
-                          return prev.filter((x) => x !== p);
-                        });
-                      }}
+                      checked={active}
+                      onChange={() => toggleProvider(t.key)}
+                      style={{ width: 16, height: 16 }}
                     />
-                    <span className="font-medium">{PROVIDER_LABEL[p]}</span>
-                    <span className="ml-auto text-xs text-gray-500">{p}</span>
-                  </label>
-                ))}
+                    {t.label}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={smallNoteStyle}>
+            Tip: toggle 1 provider for speed or multiple for comparison.
+          </div>
+
+          <div style={sectionTitleStyle}>API keys & per-provider config</div>
+
+          {allProviders.map((p) => {
+            const cfg = configs[p] ?? {};
+            return (
+              <div key={p} style={cardStyle}>
+                <div style={rowStyle}>
+                  <div style={{ fontWeight: 800 }}>{labelForProvider(p)}</div>
+                  <div style={{ fontSize: 12, opacity: 0.6 }}>{p}</div>
+                </div>
+
+                <div style={{ marginTop: 10 }}>
+                  <div style={labelStyle}>API Key</div>
+                  <input
+                    style={inputStyle}
+                    value={apiKeys[p] ?? ""}
+                    placeholder={`Paste ${labelForProvider(p)} API key`}
+                    onChange={(e) => updateApiKey(p, e.target.value)}
+                    type="password"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <div style={smallNoteStyle}>Stored locally in your browser (localStorage).</div>
+                </div>
+
+                <div style={{ marginTop: 10 }}>
+                  <div style={labelStyle}>Model</div>
+                  <input
+                    style={inputStyle}
+                    value={(cfg.model as string) ?? ""}
+                    onChange={(e) => updateConfigField(p, "model", e.target.value)}
+                    placeholder="model name"
+                    spellCheck={false}
+                  />
+                  <div style={smallNoteStyle}>Must be a model your key has access to.</div>
+                </div>
+
+                <div style={{ marginTop: 10 }}>
+                  <div style={labelStyle}>Temperature (0–2)</div>
+                  <input
+                    style={inputStyle}
+                    value={String(cfg.temperature ?? 0.2)}
+                    onChange={(e) => updateConfigField(p, "temperature", e.target.value)}
+                    inputMode="decimal"
+                  />
+                </div>
+
+                <div style={{ marginTop: 10 }}>
+                  <div style={labelStyle}>Max tokens</div>
+                  <input
+                    style={inputStyle}
+                    value={String(cfg.maxTokens ?? 1400)}
+                    onChange={(e) => updateConfigField(p, "maxTokens", e.target.value)}
+                    inputMode="numeric"
+                  />
+                </div>
               </div>
-            </div>
+            );
+          })}
 
-            {/* Per-provider config */}
-            <div className="mb-2">
-              <div className="text-sm font-semibold mb-2">Provider keys & config</div>
-
-              <div className="flex flex-col gap-3">
-                {providerRows.map(({ p, cfg, keyVal, enabled }) => (
-                  <div key={p} className="border rounded-lg p-3">
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="font-semibold text-sm">{PROVIDER_LABEL[p]}</div>
-                      <div className="text-xs text-gray-500">
-                        {enabled ? "Enabled" : "Disabled"}
-                      </div>
-                    </div>
-
-                    {/* API Key */}
-                    <label className="block text-xs font-medium text-gray-700 mb-1">
-                      API Key
-                    </label>
-                    <input
-                      className="w-full border rounded px-3 py-2 text-sm mb-3"
-                      value={keyVal}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        setApiKeys((prev) => ({ ...prev, [p]: v }));
-                      }}
-                      placeholder={`Paste ${p} API key`}
-                    />
-
-                    {/* Model */}
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                      <div>
-                        <label className="block text-xs font-medium text-gray-700 mb-1">
-                          Model
-                        </label>
-                        <input
-                          className="w-full border rounded px-3 py-2 text-sm"
-                          value={cfg.model ?? ""}
-                          onChange={(e) => {
-                            const v = e.target.value;
-                            setConfigs((prev) => ({
-                              ...prev,
-                              [p]: { ...prev[p], model: v },
-                            }));
-                          }}
-                          placeholder="model id"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="block text-xs font-medium text-gray-700 mb-1">
-                          Temperature
-                        </label>
-                        <input
-                          className="w-full border rounded px-3 py-2 text-sm"
-                          inputMode="decimal"
-                          value={String(cfg.temperature ?? 0.2)}
-                          onChange={(e) => {
-                            const n = clampNumber(e.target.value, 0.2);
-                            setConfigs((prev) => ({
-                              ...prev,
-                              [p]: { ...prev[p], temperature: n },
-                            }));
-                          }}
-                        />
-                      </div>
-
-                      <div>
-                        <label className="block text-xs font-medium text-gray-700 mb-1">
-                          Max tokens
-                        </label>
-                        <input
-                          className="w-full border rounded px-3 py-2 text-sm"
-                          inputMode="numeric"
-                          value={String(cfg.maxTokens ?? 1400)}
-                          onChange={(e) => {
-                            const n = clampNumber(e.target.value, 1400);
-                            setConfigs((prev) => ({
-                              ...prev,
-                              [p]: { ...prev[p], maxTokens: n },
-                            }));
-                          }}
-                        />
-                      </div>
-                    </div>
-
-                    <div className="mt-2 text-[11px] text-gray-500">
-                      Tip: if a provider errors, confirm the model name is one you have access to.
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="mt-4 text-xs text-gray-600">
-              Close this dialog to return to the main screen. Your inputs remain saved locally.
-            </div>
+          <div style={{ marginTop: 12, fontSize: 12, opacity: 0.65 }}>
+            Click outside the panel or press Esc to close.
           </div>
         </div>
       </div>

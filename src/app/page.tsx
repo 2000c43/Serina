@@ -139,7 +139,6 @@ export default function HomePage() {
     }
   }, [prompt, selectedProviders, useRetrieval, apiKeys, configs]);
 
-  // Enter = Run (Shift+Enter newline)
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key === "Enter" && !e.shiftKey) {
@@ -151,8 +150,10 @@ export default function HomePage() {
   );
 
   return (
+    // ✅ SAFE AREA: only apply safe-area padding ONCE (on the outer wrapper)
     <div className="min-h-[100dvh] flex flex-col bg-gray-50 text-gray-900 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
-      <header className="flex items-center justify-between px-6 py-4 border-b bg-white pt-[env(safe-area-inset-top)]">
+      {/* Header (no extra safe-area padding here, or it doubles) */}
+      <header className="flex items-center justify-between px-6 py-4 border-b bg-white">
         <h1 className="text-lg font-semibold">Serina</h1>
         <button
           onClick={() => setSettingsOpen(true)}
@@ -165,8 +166,7 @@ export default function HomePage() {
       <main className="flex-1 p-6 max-w-5xl mx-auto w-full">
         <div className="mb-4">
           <textarea
-            // IMPORTANT: iOS will auto-zoom inputs < 16px. Use text-base (16px).
-            className="w-full min-h-[100px] border rounded p-3 text-base"
+            className="w-full min-h-[100px] border rounded p-3 text-sm"
             placeholder="Ask anything…"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
