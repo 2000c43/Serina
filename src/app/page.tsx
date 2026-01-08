@@ -2,7 +2,13 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import type { ProviderConfigMap, ProviderName, ProviderResponse } from "./lib/types";
+import type {
+  ProviderConfigMap,
+  ProviderName,
+  ProviderResponse,
+  MetaSummaryResponse,
+} from "./lib/types";
+
 import ResponseGrid from "./components/ResponseGrid";
 import SettingsDrawer from "./components/SettingsDrawer";
 
@@ -32,6 +38,26 @@ const defaultConfigFor = (p: ProviderName): ProviderConfig => {
   return { model: "", temperature: 0.2, maxTokens: 1400 };
 };
 
+function buildCopyText(meta: MetaSummaryResponse | null) {
+  if (!meta) return "";
+  const lines: string[] = [];
+  if (meta.finalAnswer) lines.push(meta.finalAnswer.trim());
+
+  if (Array.isArray(meta.keyFacts) && meta.keyFacts.length) {
+    lines.push("");
+    lines.push("Key facts:");
+    for (const k of meta.keyFacts) lines.push(`- ${k}`);
+  }
+
+  if (Array.isArray(meta.disagreements) && meta.disagreements.length) {
+    lines.push("");
+    lines.push("Disagreements:");
+    for (const d of meta.disagreements) lines.push(`- ${d}`);
+  }
+
+  return lines.join("\n").trim();
+}
+
 export default function HomePage() {
   const [prompt, setPrompt] = useState("");
   const [results, setResults] = useState<ProviderResponse[]>([]);
@@ -53,6 +79,12 @@ export default function HomePage() {
     gemini: defaultConfigFor("gemini"),
     xai: defaultConfigFor("xai"),
   }));
+
+  // Summary state (RESTORED)
+  const [meta, setMeta] = useState<MetaSummaryResponse | null>(null);
+  const [metaLoading, setMetaLoading] = useState(false);
+  const [metaError, setMetaError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   // Load saved state
   useEffect(() => {
@@ -99,6 +131,54 @@ export default function HomePage() {
     } catch {}
   }, [useRetrieval]);
 
+  const runMetaSummary = useCallback(
+    async (promptText: string, providerResults: ProviderResponse[], webSnips: WebSnippet[]) => {
+      if (!promptText.trim()) return;
+
+      setMetaLoading(true);
+      setMetaError(null);
+      setMeta(null);
+      setCopied(false);
+
+      try {
+        const res = await fetch("/api/meta-summary", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt: promptText,
+            results: providerResults,
+            snippets: webSnips,
+          }),
+        });
+
+        const json = await res.json();
+
+        // Support a few shapes defensively:
+        // 1) { meta: { ... } }
+        // 2) { ...MetaSummaryResponse }
+        // 3) { error: "..." }
+        const maybeMeta = (json?.meta ?? json) as MetaSummaryResponse;
+
+        if (json?.error) {
+          setMetaError(String(json.error));
+          setMeta(null);
+        } else if (maybeMeta && typeof maybeMeta === "object" && typeof maybeMeta.finalAnswer === "string") {
+          setMeta(maybeMeta);
+          setMetaError(null);
+        } else {
+          setMeta(null);
+          setMetaError("No summary text returned.");
+        }
+      } catch (err) {
+        setMeta(null);
+        setMetaError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setMetaLoading(false);
+      }
+    },
+    []
+  );
+
   const runQuery = useCallback(async () => {
     if (!prompt.trim()) return;
 
@@ -106,6 +186,12 @@ export default function HomePage() {
     setResults([]);
     setSnippets([]);
     setUsedRetrieval(false);
+
+    // Clear summary for new run
+    setMeta(null);
+    setMetaError(null);
+    setMetaLoading(false);
+    setCopied(false);
 
     try {
       const res = await fetch("/api/query-stream", {
@@ -122,23 +208,28 @@ export default function HomePage() {
 
       const json = await res.json();
 
-      if (Array.isArray(json?.results)) setResults(json.results);
-      else setResults([]);
+      const nextResults: ProviderResponse[] = Array.isArray(json?.results) ? json.results : [];
+      const nextSnippets: WebSnippet[] = Array.isArray(json?.snippets) ? json.snippets : [];
 
-      if (Array.isArray(json?.snippets)) setSnippets(json.snippets);
-      else setSnippets([]);
-
+      setResults(nextResults);
+      setSnippets(nextSnippets);
       setUsedRetrieval(Boolean(json?.usedRetrieval));
+
+      // Run meta-summary after we have the provider answers (+ retrieval snippets, if any)
+      await runMetaSummary(prompt, nextResults, nextSnippets);
     } catch (err) {
       console.error(err);
       setResults([]);
       setSnippets([]);
       setUsedRetrieval(false);
+      setMeta(null);
+      setMetaError("Query failed.");
     } finally {
       setLoading(false);
     }
-  }, [prompt, selectedProviders, useRetrieval, apiKeys, configs]);
+  }, [prompt, selectedProviders, useRetrieval, apiKeys, configs, runMetaSummary]);
 
+  // Enter = Run (Shift+Enter newline)
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key === "Enter" && !e.shiftKey) {
@@ -149,10 +240,21 @@ export default function HomePage() {
     [runQuery]
   );
 
+  const onCopySummary = useCallback(async () => {
+    const text = buildCopyText(meta);
+    if (!text) return;
+
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // ignore
+    }
+  }, [meta]);
+
   return (
-    // ✅ SAFE AREA: only apply safe-area padding ONCE (on the outer wrapper)
-    <div className="min-h-[100dvh] flex flex-col bg-gray-50 text-gray-900 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
-      {/* Header (no extra safe-area padding here, or it doubles) */}
+    <div className="min-h-[100dvh] flex flex-col bg-gray-50 text-gray-900">
       <header className="flex items-center justify-between px-6 py-4 border-b bg-white">
         <h1 className="text-lg font-semibold">Serina</h1>
         <button
@@ -185,21 +287,79 @@ export default function HomePage() {
           </button>
 
           <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={useRetrieval} onChange={(e) => setUseRetrieval(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={useRetrieval}
+              onChange={(e) => setUseRetrieval(e.target.checked)}
+            />
             Use retrieval
           </label>
 
-          <div className="text-xs opacity-70">Active: {selectedProviders.join(", ") || "(none)"}</div>
+          <div className="text-xs opacity-70">
+            Active: {selectedProviders.join(", ") || "(none)"}
+          </div>
         </div>
 
+        {/* ✅ SUMMARY (RESTORED) */}
+        <div className="mb-4 border rounded bg-white p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="font-semibold text-sm">Summary</div>
+
+            <button
+              type="button"
+              onClick={onCopySummary}
+              disabled={!meta || !buildCopyText(meta)}
+              className="text-xs px-2 py-1 rounded border hover:bg-gray-50 disabled:opacity-50 cursor-pointer"
+              title="Copy summary"
+            >
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+
+          {metaLoading ? (
+            <div className="text-xs opacity-70 mt-2">Running…</div>
+          ) : metaError ? (
+            <div className="text-xs text-red-600 mt-2">Summary error: {metaError}</div>
+          ) : meta ? (
+            <div className="mt-2 space-y-3">
+              <div className="text-sm whitespace-pre-wrap">{meta.finalAnswer}</div>
+
+              {Array.isArray(meta.keyFacts) && meta.keyFacts.length > 0 && (
+                <div>
+                  <div className="text-xs font-semibold mb-1">Key facts</div>
+                  <ul className="list-disc pl-5 text-xs space-y-1">
+                    {meta.keyFacts.map((k, idx) => (
+                      <li key={idx}>{k}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {Array.isArray(meta.disagreements) && meta.disagreements.length > 0 && (
+                <div>
+                  <div className="text-xs font-semibold mb-1">Disagreements</div>
+                  <ul className="list-disc pl-5 text-xs space-y-1">
+                    {meta.disagreements.map((d, idx) => (
+                      <li key={idx}>{d}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="text-xs opacity-70 mt-2">No summary yet.</div>
+          )}
+        </div>
+
+        {/* Retrieval */}
         {useRetrieval && (
           <div className="mb-4 border rounded bg-white p-3">
-            <div className="font-semibold text-sm mb-2">
-              Web sources {usedRetrieval ? "" : "(none returned — check TAVILY_API_KEY)"}
-            </div>
+            <div className="font-semibold text-sm mb-2">Web sources</div>
 
             {snippets.length === 0 ? (
-              <div className="text-xs opacity-70">No snippets available.</div>
+              <div className="text-xs opacity-70">
+                {loading ? "Running…" : usedRetrieval ? "No snippets available." : "No snippets available."}
+              </div>
             ) : (
               <div className="flex flex-col gap-3">
                 {snippets.map((s) => (
